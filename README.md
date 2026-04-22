@@ -1,36 +1,68 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SmartHub — ESP32 Smart Plug Dashboard
+
+A real-time monitoring and control dashboard for an ESP32-based smart plug, built with Next.js 15.
+
+## Features
+
+- **Live Monitoring** — Voltage, current, power, and energy readings with animated gauges, auto-refreshed every 2 seconds
+- **Relay Control** — Toggle, force ON / force OFF the plug remotely
+- **Device Status** — Online/offline indicator with last-seen timestamp and last-known state when offline
+- **Automated Scheduling** — Set time-based ON/OFF schedules (IST timezone), stored in localStorage
+- **History Page** — Paginated data archive (50 records per page, fetched from backend), with relay status filter and power consumption chart
+- **Dark / Light Theme** — Toggle persisted via `data-theme` attribute
+
+## Tech Stack
+
+- [Next.js 15](https://nextjs.org) (App Router, `'use client'`)
+- TypeScript
+- Tailwind CSS v4
+- Google Fonts — Orbitron (display) + JetBrains Mono (monospace)
+
+## Project Structure
+
+```
+app/
+├── page.tsx              # Main dashboard (status, control, gauges, scheduler)
+├── layout.tsx            # Root layout with fonts and metadata
+├── globals.css           # All styles — dark/light themes, components
+├── history/
+│   └── page.tsx          # History page with server-side pagination
+└── components/
+    └── ThemeToggle.tsx   # Dark/light theme toggle button
+```
 
 ## Getting Started
 
-First, run the development server:
-
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Backend API
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+All requests go to `https://smarthublite.vercel.app`.
 
-## Learn More
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/device/status?device_id=smart_plug` | Latest device status |
+| `POST` | `/api/device/command` | Send relay command (`toggle` / `on` / `off`) |
+| `GET` | `/api/device/history?device_id=smart_plug&page=1&limit=50` | Paginated history |
 
-To learn more about Next.js, take a look at the following resources:
+### Command body
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```json
+{
+  "device_id": "smart_plug",
+  "command": { "action": "toggle" }
+}
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### History pagination
 
-## Deploy on Vercel
+The history page fetches 50 records per page directly from the backend using `page` and `limit` query params. The **Next** button is disabled when the backend returns fewer than 50 records (no more pages).
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Scheduling
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Schedules are stored in `localStorage` under the key `smart_plug_schedules`. The scheduler checks every 30 seconds against the current IST time and fires the configured command automatically.

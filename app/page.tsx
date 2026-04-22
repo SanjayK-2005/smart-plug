@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ThemeToggle from './components/ThemeToggle';
 
 const API_BASE = 'https://smarthublite.vercel.app';
@@ -19,10 +19,13 @@ interface DeviceStatus {
 }
 
 interface Schedule {
+  id: string;
   time: string;
   action: 'on' | 'off';
   enabled: boolean;
-  id: string;
+  repeat: 'daily' | 'weekly' | 'once';
+  description: string;
+  dayOfWeek: number; // IST day when created (for weekly)
 }
 
 export default function SmartPlugDashboard() {
@@ -32,13 +35,14 @@ export default function SmartPlugDashboard() {
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [newScheduleTime, setNewScheduleTime] = useState('');
   const [newScheduleAction, setNewScheduleAction] = useState<'on' | 'off'>('on');
+  const [newScheduleRepeat, setNewScheduleRepeat] = useState<'daily' | 'weekly' | 'once'>('daily');
+  const [newScheduleDesc, setNewScheduleDesc] = useState('');
+  const workerRef = useRef<Worker | null>(null);
 
   // Load schedules from localStorage
   useEffect(() => {
     const saved = localStorage.getItem('smart_plug_schedules');
-    if (saved) {
-      setSchedules(JSON.parse(saved));
-    }
+    if (saved) setSchedules(JSON.parse(saved));
   }, []);
 
   // Save schedules to localStorage
@@ -80,28 +84,39 @@ export default function SmartPlugDashboard() {
     }
   };
 
-  // Schedule checker with IST timezone
+  // Web Worker scheduler
   useEffect(() => {
-    const checkSchedules = () => {
-      const now = new Date();
-      // Convert to IST (UTC+5:30)
-      const istOffset = 5.5 * 60 * 60 * 1000;
-      const istTime = new Date(now.getTime() + istOffset);
-      const currentTime = `${String(istTime.getUTCHours()).padStart(2, '0')}:${String(istTime.getUTCMinutes()).padStart(2, '0')}`;
-      
-      schedules.forEach(schedule => {
-        if (schedule.enabled && schedule.time === currentTime) {
-          sendCommand(schedule.action);
-        }
-      });
+    const worker = new Worker('/scheduler.worker.js');
+    workerRef.current = worker;
+
+    const lastFired: Record<string, boolean> = JSON.parse(
+      localStorage.getItem('smart_plug_last_fired') || '{}'
+    );
+
+    worker.postMessage({ type: 'INIT', schedules, lastFired });
+
+    worker.onmessage = (e) => {
+      if (e.data.type === 'FIRE') {
+        e.data.toFire.forEach((item: { id: string; action: string; fireKey: string }) => {
+          // Mark fired in localStorage immediately to prevent re-fire on refresh
+          const stored: Record<string, boolean> = JSON.parse(
+            localStorage.getItem('smart_plug_last_fired') || '{}'
+          );
+          stored[item.fireKey] = true;
+          localStorage.setItem('smart_plug_last_fired', JSON.stringify(stored));
+          worker.postMessage({ type: 'MARK_FIRED', fireKey: item.fireKey });
+          sendCommand(item.action);
+        });
+      }
     };
 
-    // Check every 30 seconds
-    const interval = setInterval(checkSchedules, 30000);
-    // Also check immediately
-    checkSchedules();
+    return () => worker.terminate();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    return () => clearInterval(interval);
+  // Keep worker in sync when schedules change
+  useEffect(() => {
+    workerRef.current?.postMessage({ type: 'UPDATE_SCHEDULES', schedules });
   }, [schedules]);
 
   // Auto-refresh status
@@ -137,14 +152,19 @@ export default function SmartPlugDashboard() {
 
   const addSchedule = () => {
     if (!newScheduleTime) return;
+    const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
     const newSchedule: Schedule = {
+      id: Date.now().toString(),
       time: newScheduleTime,
       action: newScheduleAction,
       enabled: true,
-      id: Date.now().toString()
+      repeat: newScheduleRepeat,
+      description: newScheduleDesc.trim(),
+      dayOfWeek: ist.getUTCDay(),
     };
-    setSchedules([...schedules, newSchedule]);
+    setSchedules(prev => [...prev, newSchedule]);
     setNewScheduleTime('');
+    setNewScheduleDesc('');
   };
 
   const toggleSchedule = (id: string) => {
@@ -442,14 +462,13 @@ export default function SmartPlugDashboard() {
           </div>
           
           <div className="schedule-creator">
-            <input 
-              type="time" 
+            <input
+              type="time"
               value={newScheduleTime}
               onChange={(e) => setNewScheduleTime(e.target.value)}
               className="time-input"
-              placeholder="HH:MM (IST)"
             />
-            <select 
+            <select
               value={newScheduleAction}
               onChange={(e) => setNewScheduleAction(e.target.value as 'on' | 'off')}
               className="action-select"
@@ -457,7 +476,24 @@ export default function SmartPlugDashboard() {
               <option value="on">⚡ POWER ON</option>
               <option value="off">⭘ POWER OFF</option>
             </select>
-            <button onClick={addSchedule} className="add-schedule-btn">+ ADD SCHEDULE</button>
+            <select
+              value={newScheduleRepeat}
+              onChange={(e) => setNewScheduleRepeat(e.target.value as 'daily' | 'weekly' | 'once')}
+              className="action-select"
+            >
+              <option value="daily">↻ DAILY</option>
+              <option value="weekly">↻ WEEKLY</option>
+              <option value="once">→ ONCE</option>
+            </select>
+            <input
+              type="text"
+              value={newScheduleDesc}
+              onChange={(e) => setNewScheduleDesc(e.target.value)}
+              className="time-input desc-input"
+              placeholder="Description (optional)"
+              maxLength={40}
+            />
+            <button onClick={addSchedule} className="add-schedule-btn">+ ADD</button>
           </div>
 
           <div className="schedule-list">
@@ -467,10 +503,16 @@ export default function SmartPlugDashboard() {
               schedules.map(schedule => (
                 <div key={schedule.id} className={`schedule-item ${!schedule.enabled ? 'disabled' : ''}`}>
                   <div className="schedule-time">{schedule.time}</div>
-                  <div className="schedule-action">{schedule.action.toUpperCase()}</div>
+                  <div className="schedule-meta">
+                    <span className={`schedule-action-badge ${schedule.action}`}>{schedule.action.toUpperCase()}</span>
+                    <span className="schedule-repeat">{(schedule.repeat || 'daily').toUpperCase()}</span>
+                  </div>
+                  {schedule.description && (
+                    <div className="schedule-desc">{schedule.description}</div>
+                  )}
                   <div className="schedule-controls">
-                    <button onClick={() => toggleSchedule(schedule.id)} className="toggle-btn">
-                      {schedule.enabled ? '●' : '○'}
+                    <button onClick={() => toggleSchedule(schedule.id)} className={`schedule-toggle-switch ${schedule.enabled ? 'on' : 'off'}`}>
+                      <span className="schedule-toggle-thumb" />
                     </button>
                     <button onClick={() => deleteSchedule(schedule.id)} className="delete-btn">✕</button>
                   </div>
